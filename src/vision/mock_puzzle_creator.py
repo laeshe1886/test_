@@ -1,10 +1,8 @@
-# src/vision/mock_puzzle_generator.py
 
 import cv2
 import numpy as np
 from pathlib import Path
 import random
-import json
 from src.utils.pose import Pose
 from src.utils.puzzle_piece import PuzzlePiece
 
@@ -25,7 +23,7 @@ class MockPuzzleGenerator:
         self.a5_width = 840
         self.a5_height = 594
         
-        self.num_cuts = 2  # num_cuts if num_cuts is not None else random.choice([2, 3])
+        self.num_cuts = 3  
         
         # Store piece positions (will be filled during save_pieces)
         self.piece_positions = {}
@@ -61,7 +59,7 @@ class MockPuzzleGenerator:
             # Option 2: Two horizontals, one vertical
             # Option 3: One vertical, one horizontal, one diagonal
             
-            config = random.choice(['vvh', 'vhh', 'vhd'])
+            config = "vhh"# random.choice(['vvh', 'vhh', 'vhd'])
             
             if config == 'vvh':
                 # Two vertical cuts dividing into thirds, one horizontal
@@ -111,7 +109,6 @@ class MockPuzzleGenerator:
                 x_min, x_max = x_coords.min(), x_coords.max()
                 y_min, y_max = y_coords.min(), y_coords.max()
                 
-                # Add padding
                 padding = 5
                 x_min = max(0, x_min - padding)
                 x_max = min(self.a4_width, x_max + padding)
@@ -149,14 +146,14 @@ class MockPuzzleGenerator:
         
         # Define corner positions (with margin from edges)
         # A5 is 840 x 594
-        margin = 80  # Distance from corner
+        margin = 20  # Distance from corner
         
         # Four corners: top-left, top-right, bottom-left, bottom-right
         corner_positions = [
             (margin, margin),                           # Top-left
-            (self.a5_width - margin, margin),          # Top-right
+            (self.a5_width + margin, margin),          # Top-right
             (margin, self.a5_height - margin),         # Bottom-left
-            (self.a5_width - margin, self.a5_height - margin)  # Bottom-right
+            (self.a5_width + margin, self.a5_height - margin)  # Bottom-right
         ]
         
         # Create PuzzlePiece objects for each saved piece
