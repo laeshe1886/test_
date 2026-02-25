@@ -66,7 +66,7 @@ class MockPuzzleGenerator:
             # Option 2: Two horizontals, one vertical
             # Option 3: One vertical, one horizontal, one diagonal
 
-            config = random.choice(["vvh", "vhh", "vhd"])
+            config = "vhh" # random.choice(["vvh", "vhh", "vhd"])
 
             if config == "vvh":
                 # Two vertical cuts dividing into thirds, one horizontal
