@@ -2,6 +2,8 @@
 
 import cv2
 import numpy as np
+
+from src.utils.geometry import rotate_and_crop
 from typing import Tuple, List
 from dataclasses import dataclass
 
@@ -17,10 +19,17 @@ class CornerFit:
 
 class CornerFitter:
     """Precisely fit puzzle pieces to target corners."""
-    
-    def __init__(self, width: int = 800, height: int = 800):
+
+    def __init__(self, width: int = 800, height: int = 800, tuning=None):
         self.canvas_width = width
         self.canvas_height = height
+        self.coarse_step = tuning.fitter_coarse_step if tuning else 5
+        self.fine_step = tuning.fitter_fine_step if tuning else 0.5
+        self.fine_range = tuning.fitter_fine_range if tuning else 10.0
+        self.outside_limit = tuning.fitter_outside_limit if tuning else 100
+        self.edge_touch_bonus = tuning.fitter_edge_touch_bonus if tuning else 50000
+        self.outside_penalty = tuning.fitter_outside_penalty if tuning else 100
+        self.edge_touch_distance = tuning.fitter_edge_touch_distance if tuning else 10
     
     
     def score_corner_fit(self, 
@@ -36,7 +45,7 @@ class CornerFitter:
         # Check if piece extends outside target
         outside_target = np.sum((rendered > 0) & (target == 0))
         
-        if outside_target > 100:  # Too much outside
+        if outside_target > self.outside_limit:
             return -1000000.0 - outside_target * 10
         
         # Check coverage inside target
@@ -47,7 +56,7 @@ class CornerFitter:
         x_min, x_max = x_coords.min(), x_coords.max()
         y_min, y_max = y_coords.min(), y_coords.max()
         
-        edge_thickness = 10
+        edge_thickness = self.edge_touch_distance
         
         # Check edge touching based on corner type
         if corner_type == 'bottom_right':
@@ -62,9 +71,9 @@ class CornerFitter:
         score = inside_coverage * 1.0
         
         if touches_edges:
-            score += 50000  # Big bonus for touching corner edges
-        
-        score -= outside_target * 100  # Penalty for going outside
+            score += self.edge_touch_bonus
+
+        score -= outside_target * self.outside_penalty
         
         return score
     
@@ -110,7 +119,7 @@ class CornerFitter:
         best_rotation = 0.0
         best_score = -float('inf')
         
-        for angle in range(0, 360, 5):
+        for angle in range(0, 360, self.coarse_step):
             rotated = self._rotate_mask(piece_mask, float(angle))  # Cast to float
             rendered = self._render_at_position(rotated, corner_pos)
             score = self.score_corner_fit(rendered, target, corner_type)
@@ -123,7 +132,7 @@ class CornerFitter:
         fine_rotation = best_rotation
         fine_score = best_score
         
-        for angle in np.arange(best_rotation - 10, best_rotation + 10, 0.5):
+        for angle in np.arange(best_rotation - self.fine_range, best_rotation + self.fine_range, self.fine_step):
             rotated = self._rotate_mask(piece_mask, float(angle))  # Cast to float
             rendered = self._render_at_position(rotated, corner_pos)
             score = self.score_corner_fit(rendered, target, corner_type)
@@ -140,26 +149,8 @@ class CornerFitter:
         )
 
     def _rotate_mask(self, mask: np.ndarray, angle: float) -> np.ndarray:
-        """Rotate a mask by exact angle."""
-        if angle == 0:
-            return mask
-        
-        h, w = mask.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        
-        # Calculate new size
-        cos = np.abs(M[0, 0])
-        sin = np.abs(M[0, 1])
-        new_w = int((h * sin) + (w * cos))
-        new_h = int((h * cos) + (w * sin))
-        
-        # Adjust translation
-        M[0, 2] += (new_w / 2) - center[0]
-        M[1, 2] += (new_h / 2) - center[1]
-        
-        rotated = cv2.warpAffine(mask, M, (new_w, new_h))
-        return rotated
+        """Rotate a mask by exact angle (no cropping)."""
+        return rotate_and_crop(mask, angle, crop=False)
     
     def _render_at_position(self, mask: np.ndarray, pos: Tuple[float, float]) -> np.ndarray:
         """Render a mask at a specific position on the canvas."""

@@ -15,7 +15,6 @@ import numpy as np
 from src.solver.iterative_solver import IterativeSolver
 from src.solver.movement_analyzer import calculate_movement_data_for_visualizer
 from src.solver.piece_analyzer import PieceAnalyzer
-from src.ui.simulator.solver_visualizer import SolverVisualizerApp
 from src.utils.pose import Pose
 from src.utils.puzzle_piece import PuzzlePiece
 
@@ -37,8 +36,6 @@ class PipelineResult:
     solution: Optional[dict] = None
 
 
-# constants
-SCORE_THRESHOLD = 205000.0
 
 
 class PuzzlePipeline:
@@ -63,10 +60,13 @@ class PuzzlePipeline:
         self.puzzle_dir = puzzle_dir  # Directory containing a saved puzzle
 
         # Initialize solver components - renderer will be created with target
+        self.tuning = config.tuning
         self.guess_generator = GuessGenerator(rotation_step=90)
         self.renderer = None  # Will be created after we have target
         self.scorer = PlacementScorer(
-            overlap_penalty=2.0, coverage_reward=1.0, gap_penalty=0.5
+            overlap_penalty=self.tuning.overlap_penalty,
+            coverage_reward=self.tuning.coverage_reward,
+            gap_penalty=self.tuning.gap_penalty,
         )
 
     def run(self) -> PipelineResult:
@@ -201,7 +201,7 @@ class PuzzlePipeline:
         piece_ids, piece_shapes = generator.load_pieces_for_solver()
 
         # NOW analyze the pieces (this is where the analysis happens)
-        PieceAnalyzer.analyze_all_pieces(puzzle_pieces, piece_shapes)
+        PieceAnalyzer.analyze_all_pieces(puzzle_pieces, piece_shapes, tuning=self.tuning)
 
         # Print analysis results
         self.logger.info("\n" + "=" * 80)
@@ -217,16 +217,21 @@ class PuzzlePipeline:
         self.logger.info(f"    Edge pieces: {edge_count}")
         self.logger.info(f"    Center pieces: {center_count}")
 
-        # Save visualizations
+        # Save visualizations (skip if directory is read-only)
         debug_dir = generator.output_dir / "debug"
-        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+            save_debug = True
+        except OSError:
+            save_debug = False
 
         for piece in puzzle_pieces:
             piece_id = int(piece.id)
             if piece_id in piece_shapes:
                 self.logger.info(f"\n{piece.summary()}")
-                vis = PieceAnalyzer.visualize_corners(piece_shapes[piece_id], piece)
-                cv2.imwrite(str(debug_dir / f"piece_{piece_id}_analysis.png"), vis)
+                if save_debug:
+                    vis = PieceAnalyzer.visualize_corners(piece_shapes[piece_id], piece)
+                    cv2.imwrite(str(debug_dir / f"piece_{piece_id}_analysis.png"), vis)
 
         self.logger.info(f"\n  → {len(piece_ids)} Teile geladen und analysiert")
         self.logger.info("=" * 80 + "\n")
@@ -260,6 +265,7 @@ class PuzzlePipeline:
             renderer=self.renderer,
             scorer=self.scorer,
             guess_generator=self.guess_generator,
+            tuning=self.tuning,
         )
 
         # Create initial placements from PuzzlePiece objects
@@ -269,7 +275,10 @@ class PuzzlePipeline:
             piece_shapes=piece_shapes,
             target=target,
             puzzle_pieces=puzzle_pieces,
-            score_threshold=SCORE_THRESHOLD,
+            score_threshold=self.tuning.score_threshold,
+            initial_corner_count=self.tuning.initial_corner_count,
+            max_corners_to_refine=self.tuning.max_corners_to_refine,
+            max_iterations=self.tuning.max_iterations,
         )
         if not solution.success:
             self.logger.warning("  ! Keine gute Loesung gefunden")
@@ -308,7 +317,7 @@ class PuzzlePipeline:
                     piece.place_pose = Pose(
                         x=placement["x"], y=placement["y"], theta=placement["theta"]
                     )
-                    piece.confidence = 1.0 if solution.score > SCORE_THRESHOLD else 0.5
+                    piece.confidence = 1.0 if solution.score > self.tuning.score_threshold else 0.5
                     self.logger.debug(f"    Piece {piece_id}: {piece.place_pose}")
                     break
 
@@ -469,71 +478,6 @@ class PuzzlePipeline:
 
         self.logger.info("\n" + "=" * 80 + "\n")
 
-    def _print_movement_instructions(
-        self, initial_placements, final_placements, surfaces
-    ):
-        """Print movement instructions for each piece in global coordinates."""
-
-        self.logger.info("\n" + "=" * 80)
-        self.logger.info("MOVEMENT INSTRUCTIONS (Global Coordinates)")
-        self.logger.info("=" * 80)
-
-        # Create lookup for initial positions
-        initial_lookup = {p["piece_id"]: p for p in initial_placements}
-
-        source_offset_x = surfaces["source"]["offset_x"]
-        source_offset_y = surfaces["source"]["offset_y"]
-        target_offset_x = surfaces["target"]["offset_x"]
-        target_offset_y = surfaces["target"]["offset_y"]
-
-        for final in final_placements:
-            piece_id = final["piece_id"]
-
-            if piece_id not in initial_lookup:
-                self.logger.warning(
-                    f"  ! Piece {piece_id} not found in initial placements"
-                )
-                continue
-
-            initial = initial_lookup[piece_id]
-
-            # Convert to global coordinates
-            # Initial position: source area coordinates
-            initial_global_x = source_offset_x + initial["x"]
-            initial_global_y = source_offset_y + initial["y"]
-
-            # Final position: target area coordinates
-            final_global_x = target_offset_x + final["x"]
-            final_global_y = target_offset_y + final["y"]
-
-            # Calculate movement
-            delta_x = final_global_x - initial_global_x
-            delta_y = final_global_y - initial_global_y
-            distance = np.sqrt(delta_x**2 + delta_y**2)
-
-            # Rotation change
-            rotation_change = (final["theta"] - initial["theta"]) % 360
-
-            self.logger.info(f"\nPiece {piece_id}:")
-            self.logger.info(
-                f"  Initial (global): ({initial_global_x:.1f}, {initial_global_y:.1f}) @ {initial['theta']:.0f}°"
-            )
-            self.logger.info(
-                f"  Final (global):   ({final_global_x:.1f}, {final_global_y:.1f}) @ {final['theta']:.0f}°"
-            )
-            self.logger.info(
-                f"  Movement: Δx={delta_x:.1f}, Δy={delta_y:.1f}, distance={distance:.1f}"
-            )
-            if rotation_change != 0:
-                self.logger.info(f"  Rotation: {rotation_change:.0f}°")
-
-            # Direction
-            if abs(delta_x) > 0.1 or abs(delta_y) > 0.1:
-                angle = np.degrees(np.arctan2(delta_y, delta_x))
-                self.logger.info(f"  Direction: {angle:.1f}° from horizontal")
-
-        self.logger.info("\n" + "=" * 80 + "\n")
-
     def _validate_solution(self, solution):
         """Loesung validieren"""
         self.logger.info("  → Geometrie pruefen...")
@@ -561,7 +505,7 @@ class PuzzlePipeline:
         self.logger.info("  → Motoren initialisieren...")
         self.logger.info("  → Teile platzieren...")
 
-        # The movement instructions are already printed by _print_movement_instructions
+        # The movement instructions are already printed by _print_movement_instructions_from_pieces
         # Hardware can read them from the log
 
         # TODO: Implementierung in PREN2
@@ -598,5 +542,6 @@ class PuzzlePipeline:
             num_movements = len(movement_data.get("movements", {}))
             self.logger.info(f"  → Calculated movement data for {num_movements} pieces")
 
+        from src.ui.simulator.solver_visualizer import SolverVisualizerApp
         app = SolverVisualizerApp(solver_data)
         app.run()
