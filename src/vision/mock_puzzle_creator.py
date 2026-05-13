@@ -13,7 +13,13 @@ class MockPuzzleGenerator:
     """Generate realistic mock puzzle pieces for testing."""
 
     def __init__(
-        self, output_dir: str = "data/mock_pieces", num_cuts: int | None = None
+        self,
+        output_dir: str = "data/mock_pieces",
+        num_cuts: int | None = None,
+        a4_width: int = 420,
+        a4_height: int = 594,
+        a5_width: int = 840,
+        a5_height: int = 594,
     ):
         self.output_dir = Path(output_dir)
         try:
@@ -21,16 +27,14 @@ class MockPuzzleGenerator:
         except OSError:
             pass
 
-        # Working at 2 pixels per mm: A4 = 210x297mm = 420x594px
-        self.a4_width = 420
-        self.a4_height = 594
+        # Dimensionen (Default entspricht 2 px/mm). Werden ueber ResolutionConfig
+        # skaliert, damit die gesamte Pipeline bei niedrigerer Aufloesung laeuft.
+        self.a4_width = a4_width
+        self.a4_height = a4_height
+        self.a5_width = a5_width
+        self.a5_height = a5_height
 
-        # A5 source area (double the area of A4)
-        # 420x297mm = 840x594px
-        self.a5_width = 840
-        self.a5_height = 594
-
-        self.num_cuts = random.choice([2, 3])
+        self.num_cuts = num_cuts if num_cuts is not None else random.choice([2, 3])
 
         # Store piece positions (will be filled during save_pieces)
         self.piece_positions = {}
@@ -348,9 +352,14 @@ class MockPuzzleGenerator:
 
         return saved_paths
 
-    def load_pieces_for_solver(self, piece_paths: list = None) -> tuple:  # type: ignore
+    def load_pieces_for_solver(self, piece_paths: list = None, scale: float = 1.0) -> tuple:  # type: ignore
         """
         Load saved pieces and prepare them for the solver.
+
+        Args:
+            piece_paths: Optional list of paths to piece images.
+            scale: Resize factor applied to each mask (e.g. 0.5 halves both dims).
+                   Use ResolutionConfig.scale so pieces match the solver canvas.
 
         Returns:
             (piece_ids, piece_shapes_dict)
@@ -379,6 +388,12 @@ class MockPuzzleGenerator:
 
             # Normalize to 0 and 1
             mask = (mask > 127).astype(np.uint8)
+
+            # An die Aufloesung anpassen, damit Stuecke zur Ziel-Canvas passen
+            if scale != 1.0:
+                new_h = max(1, int(round(mask.shape[0] * scale)))
+                new_w = max(1, int(round(mask.shape[1] * scale)))
+                mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
             piece_shapes[i] = mask
             piece_ids.append(i)
