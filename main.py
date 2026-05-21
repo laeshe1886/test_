@@ -13,6 +13,7 @@ if _six_pieces:
 from src.core.pipeline import PuzzlePipeline
 from src.core.config import Config
 from src.utils.logger import setup_logger
+from src.vision import cam_module
 
 # Projekt-Root zum Path hinzufügen
 project_root = Path(__file__).parent
@@ -34,7 +35,20 @@ def main():
             config.vision.regenerate_mock = True
         if _six_pieces:
             config.vision.num_cuts = 3
-        pipeline = PuzzlePipeline(config, show_ui=True)  # Enable UI
+
+        #cam starten
+        logger.info("Starte Kameramodul...")
+        cam_module.main()
+        logger.info("Kameramodul abgeschlossen")
+
+        # Kamera-Eingabe hat Vorrang: input/parts.json vorhanden?
+        puzzle_dir = None
+        input_dir = project_root / "input"
+        if (input_dir / "parts.json").exists():
+            puzzle_dir = str(input_dir)
+            logger.info(f"Kamera-Eingabe erkannt: {input_dir}")
+
+        pipeline = PuzzlePipeline(config, show_ui=True, puzzle_dir=puzzle_dir)
         result = pipeline.run()
         
         if result.success:

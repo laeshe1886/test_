@@ -2,6 +2,7 @@
 """
 PREN Puzzle Solver - GUI Controller Application
 Main control interface for batch puzzle generation and solving
+Enhanced with timestamp tracking and scatter plot visualization
 """
 
 import os
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 from kivy.app import App
 from kivy.clock import Clock
@@ -28,17 +31,18 @@ from kivy.uix.image import Image
 from kivy.uix.label import Label
 from kivy.uix.progressbar import ProgressBar
 from kivy.uix.scrollview import ScrollView
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-from src.core.config import Config
+# Projekt-Root zum Path hinzufugen
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from src.core.config import Config, SolverTuning
 from src.core.pipeline import PuzzlePipeline
 from src.solver.validation.scorer import PlacementScorer
 from src.ui.simulator.solver_visualizer import SolverVisualizer
 from src.utils.logger import setup_logger
 from src.vision.mock_puzzle_creator import MockPuzzleGenerator
-
-# Projekt-Root zum Path hinzufügen
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
 
 
 @dataclass
@@ -62,22 +66,42 @@ class SolveResult:
     score: float
     num_guesses: int
     confidence: float
+    completion_timestamp: datetime  # NEW: Track when each puzzle was completed
     error_message: str = ""
     steps_data: Optional[Dict] = None
 
 
-class PuzzleThumbnail(Image):
+class PuzzleThumbnail(BoxLayout):
     """Custom widget for displaying puzzle thumbnails with selection state"""
 
     def __init__(self, puzzle_data, **kwargs):
         super().__init__(**kwargs)
+        self.orientation = "vertical"
         self.puzzle_data = puzzle_data
         self.size_hint = (None, None)
-        self.size = (dp(120), dp(120))
-        self.allow_stretch = True
-        self.keep_ratio = False
+        self.size = (dp(120), dp(140))
+        self.spacing = dp(2)
         self.bind(on_touch_down=self.on_click)
         self.is_selected = False
+
+        # Image widget
+        self.img = Image(
+            size_hint_y=None,
+            height=dp(120),
+            allow_stretch=True,
+            keep_ratio=False,
+        )
+        self.add_widget(self.img)
+
+        # Label for tries count (shown after solving)
+        self.tries_label = Label(
+            text="",
+            size_hint_y=None,
+            height=dp(16),
+            font_size="10sp",
+            color=(0.3, 0.3, 0.3, 1),
+        )
+        self.add_widget(self.tries_label)
 
         # Load and display thumbnail
         self.load_thumbnail()
@@ -86,21 +110,22 @@ class PuzzleThumbnail(Image):
         with self.canvas.before:
             self.border_color = Color(0.3, 0.3, 0.3, 1)  # Store reference
             self.border = Rectangle(size=self.size, pos=self.pos)
-            self.bind(size=self._update_border, pos=self._update_border)
+        self.bind(size=self._update_border, pos=self._update_border)
 
     def load_thumbnail(self):
         """Load or create appropriate thumbnail based on solve status"""
         try:
-            # Check if puzzle is solved
             is_solved = self.puzzle_data.get("solved", False)
-
             if is_solved and "solve_result" in self.puzzle_data:
-                # Create solved thumbnail (best solution visualization)
                 self._create_solved_thumbnail()
+                result = self.puzzle_data["solve_result"]
+                if result.num_guesses > 0:
+                    self.tries_label.text = f"{result.num_guesses} tries"
+                else:
+                    self.tries_label.text = "failed"
             else:
-                # Create unsolved thumbnail (source pieces layout)
                 self._create_unsolved_thumbnail()
-
+                self.tries_label.text = ""
         except Exception as e:
             print(
                 f"Error creating thumbnail for puzzle {self.puzzle_data.get('id', '?')}: {e}"
@@ -127,133 +152,28 @@ class PuzzleThumbnail(Image):
                 # Resize to thumbnail size
                 thumbnail = cv2.resize(rendered_color, (120, 120))
 
-                # Add "SOLVED" indicator
-                cv2.putText(
-                    thumbnail,
-                    "SOLVED",
-                    (5, 15),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (0, 255, 0),
-                    1,
-                )
-                cv2.putText(
-                    thumbnail,
-                    f"#{self.puzzle_data.get('id', '?')}",
-                    (5, 110),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-
                 # Save and load
-                temp_path = f"temp/solved_thumb_{self.puzzle_data.get('id', 0)}.png"
+                puzzle_dir = self.puzzle_data.get("directory", ".")
+                temp_path = os.path.join(puzzle_dir, "solved_thumb.png")
                 cv2.imwrite(temp_path, thumbnail)
-                self.source = temp_path
+                self.img.source = temp_path
+                self.img.reload()
             else:
                 self._create_placeholder()
-
         except Exception as e:
             print(f"Error creating solved thumbnail: {e}")
             self._create_placeholder()
 
     def _create_unsolved_thumbnail(self):
-        """Create thumbnail showing source pieces layout (like left side of visualizer)"""
+        """Create thumbnail showing source pieces layout"""
         try:
-            # Check if we have the debug image saved
-            debug_path = self.puzzle_data.get("debug_path")
-            if debug_path and os.path.exists(debug_path):
-                # Use the debug image which shows the cuts
-                debug_img = cv2.imread(debug_path)
-                if debug_img is not None:
-                    # Resize to thumbnail size
-                    thumbnail = cv2.resize(debug_img, (120, 120))
+            # Use the pre-saved thumbnail directly
+            thumbnail_path = self.puzzle_data.get("thumbnail_path")
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                self.img.source = thumbnail_path
+                return
 
-                    # Add "UNSOLVED" indicator
-                    cv2.putText(
-                        thumbnail,
-                        "UNSOLVED",
-                        (2, 15),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.35,
-                        (0, 0, 255),
-                        1,
-                    )
-                    cv2.putText(
-                        thumbnail,
-                        f"#{self.puzzle_data.get('id', '?')}",
-                        (5, 110),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 255, 255),
-                        1,
-                    )
-
-                    # Save and load
-                    temp_path = (
-                        f"temp/unsolved_thumb_{self.puzzle_data.get('id', 0)}.png"
-                    )
-                    cv2.imwrite(temp_path, thumbnail)
-                    self.source = temp_path
-                    return
-
-            # Fallback: create from piece images if available
-            piece_paths = self.puzzle_data.get("piece_paths", [])
-            if piece_paths:
-                # Create a simple grid layout of pieces
-                thumbnail = np.ones((120, 120, 3), dtype=np.uint8) * 240
-
-                # Load and arrange first few pieces in a grid
-                pieces_per_row = 2
-                piece_size = 50
-                start_x, start_y = 10, 10
-
-                for i, piece_path in enumerate(piece_paths[:4]):  # Show max 4 pieces
-                    if os.path.exists(piece_path):
-                        piece_img = cv2.imread(piece_path)
-                        if piece_img is not None:
-                            piece_small = cv2.resize(
-                                piece_img, (piece_size, piece_size)
-                            )
-
-                            row = i // pieces_per_row
-                            col = i % pieces_per_row
-                            y = start_y + row * (piece_size + 5)
-                            x = start_x + col * (piece_size + 5)
-
-                            if y + piece_size <= 120 and x + piece_size <= 120:
-                                thumbnail[y : y + piece_size, x : x + piece_size] = (
-                                    piece_small
-                                )
-
-                # Add labels
-                cv2.putText(
-                    thumbnail,
-                    "UNSOLVED",
-                    (2, 15),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35,
-                    (0, 0, 255),
-                    1,
-                )
-                cv2.putText(
-                    thumbnail,
-                    f"#{self.puzzle_data.get('id', '?')}",
-                    (5, 110),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (0, 0, 0),
-                    1,
-                )
-
-                # Save and load
-                temp_path = f"temp/unsolved_thumb_{self.puzzle_data.get('id', 0)}.png"
-                cv2.imwrite(temp_path, thumbnail)
-                self.source = temp_path
-            else:
-                self._create_placeholder()
-
+            self._create_placeholder()
         except Exception as e:
             print(f"Error creating unsolved thumbnail: {e}")
             self._create_placeholder()
@@ -271,9 +191,10 @@ class PuzzleThumbnail(Image):
                 (0, 0, 0),
                 2,
             )
-            temp_path = f"temp/thumb_{self.puzzle_data.get('id', 0)}.png"
+            puzzle_dir = self.puzzle_data.get("directory", ".")
+            temp_path = os.path.join(puzzle_dir, "placeholder_thumb.png")
             cv2.imwrite(temp_path, placeholder)
-            self.source = temp_path
+            self.img.source = temp_path
         except Exception as e:
             print(f"Error creating placeholder: {e}")
 
@@ -315,9 +236,8 @@ class PuzzleGrid(GridLayout):
         self.spacing = dp(10)
         self.padding = dp(10)
         self.size_hint_y = None
-        self.height = dp(140)
-        self.bind(minimum_height=self._update_height)  # This was causing the error
-
+        self.height = dp(155)
+        self.bind(minimum_height=self._update_height)
         self.puzzles = []
         self.selected_puzzle = None
         self.selected_thumbnail = None
@@ -337,7 +257,8 @@ class PuzzleGrid(GridLayout):
                 if isinstance(self.spacing, (list, tuple))
                 else self.spacing
             )
-            self.height = rows * dp(140) + (rows - 1) * spacing_value
+            self.height = rows * dp(155) + (rows - 1) * spacing_value
+
             print(f"  Successfully added puzzle to grid (total: {len(self.puzzles)})")
         except Exception as e:
             print(f"ERROR adding puzzle to grid: {e}")
@@ -351,7 +272,7 @@ class PuzzleGrid(GridLayout):
         self.puzzles = []
         self.selected_puzzle = None
         self.selected_thumbnail = None
-        self.height = dp(140)
+        self.height = dp(155)
 
     def on_puzzle_selected(self, puzzle_data, thumbnail_widget):
         """Handle puzzle selection"""
@@ -393,7 +314,14 @@ class ControllerGUI(BoxLayout):
         # Initialize components
         self.logger = setup_logger("controller_gui")
         self.config = Config()
-        self.puzzle_generator = MockPuzzleGenerator(output_dir="data/mock_pieces")
+        r = self.config.resolution
+        self.puzzle_generator = MockPuzzleGenerator(
+            output_dir="data/mock_pieces",
+            a4_width=r._dim(r.a4_width_mm, r.native_px_per_mm),
+            a4_height=r._dim(r.a4_height_mm, r.native_px_per_mm),
+            a5_width=r._dim(r.a5_width_mm, r.native_px_per_mm),
+            a5_height=r._dim(r.a5_height_mm, r.native_px_per_mm),
+        )
         self.current_puzzle_set = None
         self.solve_results = []
         self.is_solving = False
@@ -408,7 +336,7 @@ class ControllerGUI(BoxLayout):
         with self.canvas.before:
             Color(0.95, 0.95, 0.95, 1)
             self.bg = Rectangle(size=self.size, pos=self.pos)
-            self.bind(size=self._update_bg, pos=self._update_bg)
+        self.bind(size=self._update_bg, pos=self._update_bg)
 
     def setup_ui(self):
         """Setup the main UI layout"""
@@ -465,44 +393,42 @@ class ControllerGUI(BoxLayout):
             bold=True,
             color=(0.3, 0.3, 0.3, 1),
         )
-
         gen_buttons = BoxLayout(orientation="horizontal", spacing=dp(10))
+
         self.add_10_btn = Button(text="Add 10 Puzzles")
         self.add_10_btn.bind(on_press=self.add_10_puzzles)
-
         self.clear_btn = Button(text="Clear All")
         self.clear_btn.bind(on_press=self.clear_all_puzzles)
 
         gen_buttons.add_widget(self.add_10_btn)
         gen_buttons.add_widget(self.clear_btn)
-
         gen_controls.add_widget(gen_title)
         gen_controls.add_widget(gen_buttons)
 
+        # Middle: Solving Controls
         solve_controls = BoxLayout(orientation="vertical", spacing=dp(5))
         solve_title = Label(
             text="Batch Solving", font_size="16sp", bold=True, color=(0.3, 0.3, 0.3, 1)
         )
-
         solve_buttons = BoxLayout(orientation="horizontal", spacing=dp(10))
+
         self.solve_all_btn = Button(text="Solve All", size_hint_x=0.5)
         self.solve_all_btn.bind(on_press=self.solve_all_puzzles)
-
         self.visualize_btn = Button(text="Visualize", size_hint_x=0.5, disabled=True)
         self.visualize_btn.bind(on_press=self.visualize_solution)
 
         solve_buttons.add_widget(self.solve_all_btn)
         solve_buttons.add_widget(self.visualize_btn)
-
         solve_controls.add_widget(solve_title)
         solve_controls.add_widget(solve_buttons)
 
-        # Right: Statistics
+        # Right: Statistics and Analytics
         stats_controls = BoxLayout(orientation="vertical", spacing=dp(5))
         stats_title = Label(
             text="Statistics", font_size="16sp", bold=True, color=(0.3, 0.3, 0.3, 1)
         )
 
+        # Stats display
         self.stats_label = Label(
             text="No puzzles generated",
             size_hint_y=None,
@@ -510,8 +436,15 @@ class ControllerGUI(BoxLayout):
             color=(0.4, 0.4, 0.4, 1),
         )
 
+        # NEW: Analytics button
+        self.analytics_btn = Button(
+            text="Show Analytics", size_hint_y=None, height=dp(25), disabled=True
+        )
+        self.analytics_btn.bind(on_press=self.show_analytics)
+
         stats_controls.add_widget(stats_title)
         stats_controls.add_widget(self.stats_label)
+        stats_controls.add_widget(self.analytics_btn)
 
         # Add all panels
         panel.add_widget(gen_controls)
@@ -578,26 +511,12 @@ class ControllerGUI(BoxLayout):
 
         return panel
 
-    def generate_10_puzzles(self, instance):
-        """Generate 10 new puzzles"""
-        self.status_label.text = "Generating 10 new puzzles..."
-        self.progress_bar.value = 0
-
-        # Clear existing puzzles
-        self.puzzle_grid.clear_puzzles()
-        self.current_puzzle_set = None
-        self.solve_results = []
-
-        # Generate in background thread
-        threading.Thread(target=self._generate_puzzles_thread, args=(10, True)).start()
-
     def add_10_puzzles(self, instance):
         """Add 10 puzzles to the current set"""
         current_count = (
             len(self.current_puzzle_set.puzzles) if self.current_puzzle_set else 0
         )
         new_count = current_count + 10
-
         self.status_label.text = (
             f"Generating puzzles {current_count + 1}-{new_count}..."
         )
@@ -632,7 +551,6 @@ class ControllerGUI(BoxLayout):
         """Background thread for puzzle generation - always generates fresh puzzles"""
         try:
             generated_puzzles = []
-
             for i in range(count):
                 puzzle_index = start_index + i
 
@@ -648,7 +566,6 @@ class ControllerGUI(BoxLayout):
                 Clock.schedule_once(
                     lambda dt, pd=puzzle_data: self.puzzle_grid.add_puzzle(pd)
                 )
-
                 time.sleep(0.1)
 
             # Update puzzle set
@@ -678,8 +595,15 @@ class ControllerGUI(BoxLayout):
         puzzle_dir = Path(f"data/generated_puzzles/puzzle_{index}")
         puzzle_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate and save puzzle (no analysis happens here)
-        generator = MockPuzzleGenerator(output_dir=str(puzzle_dir))
+        # Generate and save puzzle at native resolution (no analysis happens here)
+        r = self.config.resolution
+        generator = MockPuzzleGenerator(
+            output_dir=str(puzzle_dir),
+            a4_width=r._dim(r.a4_width_mm, r.native_px_per_mm),
+            a4_height=r._dim(r.a4_height_mm, r.native_px_per_mm),
+            a5_width=r._dim(r.a5_width_mm, r.native_px_per_mm),
+            a5_height=r._dim(r.a5_height_mm, r.native_px_per_mm),
+        )
         full_image, piece_images, debug_image, puzzle_pieces = (
             generator.generate_puzzle_with_positions()
         )
@@ -784,8 +708,8 @@ class ControllerGUI(BoxLayout):
                 self.config, show_ui=False, puzzle_dir=puzzle_data["directory"]
             )
             result = pipeline.run()
-
             duration = time.time() - start_time
+            completion_timestamp = datetime.now()  # NEW: Record completion time
 
             if result.success and result.solution:
                 score = result.solution.get("score", 0.0)
@@ -813,8 +737,11 @@ class ControllerGUI(BoxLayout):
                         renderer = result.solution["renderer"]
                         piece_shapes = result.solution["piece_shapes"]
                         target = result.solution["target"]
+                        tuning = SolverTuning()
                         scorer = PlacementScorer(
-                            overlap_penalty=2.0, coverage_reward=1.0, gap_penalty=0.5
+                            overlap_penalty=tuning.overlap_penalty,
+                            coverage_reward=tuning.coverage_reward,
+                            gap_penalty=tuning.gap_penalty,
                         )
 
                         for i, guess in enumerate(guesses):
@@ -827,7 +754,6 @@ class ControllerGUI(BoxLayout):
                                     best_guess_index = i
                             except:
                                 continue
-
                     except Exception as e:
                         print(f"Error calculating best score: {e}")
                         best_score = score
@@ -842,7 +768,7 @@ class ControllerGUI(BoxLayout):
                     "surfaces": result.solution.get("surfaces", {}),
                     "renderer": result.solution.get("renderer"),
                     "puzzle_pieces": result.solution.get("puzzle_pieces", []),
-                    "best_score": best_score,  # Add this line
+                    "best_score": best_score,
                     "best_guess": best_guess,
                     "best_guess_index": best_guess_index,
                     "movement_data": result.solution.get("movement_data", {}),
@@ -855,6 +781,7 @@ class ControllerGUI(BoxLayout):
                     score=score,
                     num_guesses=num_guesses,
                     confidence=confidence,
+                    completion_timestamp=completion_timestamp,  # NEW
                     steps_data=steps_data,
                 )
             else:
@@ -865,13 +792,14 @@ class ControllerGUI(BoxLayout):
                     score=0.0,
                     num_guesses=0,
                     confidence=0.0,
+                    completion_timestamp=completion_timestamp,  # NEW
                     error_message=result.message,
                 )
 
         except Exception as e:
             duration = time.time() - start_time
+            completion_timestamp = datetime.now()  # NEW
             self.logger.exception(f"Failed to solve puzzle {puzzle_data['id']}: {e}")
-
             return SolveResult(
                 puzzle_id=str(puzzle_data["id"]),
                 success=False,
@@ -879,6 +807,7 @@ class ControllerGUI(BoxLayout):
                 score=0.0,
                 num_guesses=0,
                 confidence=0.0,
+                completion_timestamp=completion_timestamp,  # NEW
                 error_message=str(e),
             )
 
@@ -974,6 +903,180 @@ class ControllerGUI(BoxLayout):
         else:
             self.visualize_btn.disabled = True
 
+    def show_analytics(self, instance):
+        """NEW: Show analytics scatter plot"""
+        if not self.solve_results or len(self.solve_results) == 0:
+            self.status_label.text = "No solve results to analyze!"
+            return
+
+        # Create analytics window
+        self._create_analytics_plot()
+
+    def _create_analytics_plot(self):
+        """NEW: Create scatter plot showing solve time vs score"""
+        try:
+            # Prepare data
+            successful_results = [r for r in self.solve_results if r.success]
+            if len(successful_results) == 0:
+                self.status_label.text = "No successful solves to analyze!"
+                return
+
+            durations = [r.duration for r in successful_results]
+            scores = [r.score for r in successful_results]
+
+            # Create figure with subplots
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle("Puzzle Solving Analytics", fontsize=16, fontweight="bold")
+
+            # 1. Scatter plot: Duration vs Score (main request)
+            ax1.scatter(
+                durations,
+                scores,
+                alpha=0.7,
+                s=60,
+                c="royalblue",
+                edgecolors="black",
+                linewidth=0.5,
+            )
+            ax1.set_xlabel("Solve Time (seconds)")
+            ax1.set_ylabel("Score")
+            ax1.set_title("Score vs Solve Time")
+            ax1.grid(True, alpha=0.3)
+
+            # Add trend line
+            if len(durations) > 1:
+                z = np.polyfit(durations, scores, 1)
+                p = np.poly1d(z)
+                ax1.plot(
+                    durations,
+                    p(durations),
+                    "r--",
+                    alpha=0.8,
+                    linewidth=2,
+                    label=f"Trend: y={z[0]:.1f}x+{z[1]:.1f}",
+                )
+                ax1.legend()
+
+            # 3. Duration histogram
+            ax3.hist(
+                durations,
+                bins=min(10, len(durations)),
+                alpha=0.7,
+                color="orange",
+                edgecolor="black",
+            )
+            ax3.set_xlabel("Solve Time (seconds)")
+            ax3.set_ylabel("Frequency")
+            ax3.set_title("Solve Time Distribution")
+            ax3.grid(True, alpha=0.3)
+
+            # Add median line
+            median_duration = statistics.median(durations)
+            ax3.axvline(
+                median_duration,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label=f"Median: {median_duration:.1f}s",
+            )
+            ax3.legend()
+
+            # 4. Statistics text
+            ax4.axis("off")
+            stats_text = self._generate_analytics_text(successful_results)
+            ax4.text(
+                0.1,
+                0.9,
+                stats_text,
+                transform=ax4.transAxes,
+                fontsize=11,
+                verticalalignment="top",
+                fontfamily="monospace",
+                bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.8),
+            )
+
+            plt.tight_layout()
+
+            # Save plot
+            plot_path = "data/analytics_plot.png"
+            plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+            plt.close()  # Close to free memory
+
+            self.status_label.text = f"Analytics plot saved to {plot_path}"
+
+            # Try to open the plot
+            try:
+                import platform
+                import subprocess
+
+                system = platform.system()
+                if system == "Darwin":  # macOS
+                    subprocess.run(["open", plot_path])
+                elif system == "Linux":
+                    subprocess.run(["xdg-open", plot_path])
+                elif system == "Windows":
+                    subprocess.run(["start", plot_path], shell=True)
+                else:
+                    print(f"Plot saved to {plot_path} - please open manually")
+
+            except Exception as e:
+                print(f"Could not auto-open plot: {e}")
+                print(f"Plot saved to {plot_path} - please open manually")
+
+        except Exception as e:
+            self.logger.exception(f"Failed to create analytics plot: {e}")
+            self.status_label.text = f"Analytics error: {e}"
+
+    def _generate_analytics_text(self, successful_results):
+        """NEW: Generate statistics text for analytics"""
+        if len(successful_results) == 0:
+            return "No successful results to analyze"
+
+        durations = [r.duration for r in successful_results]
+        scores = [r.score for r in successful_results]
+
+        # Calculate statistics
+        total_puzzles = len(self.solve_results) if self.solve_results else 0
+        success_count = len(successful_results)
+        success_rate = success_count / total_puzzles * 100 if total_puzzles > 0 else 0
+
+        # Duration stats
+        mean_duration = statistics.mean(durations)
+        median_duration = statistics.median(durations)
+        min_duration = min(durations)
+        max_duration = max(durations)
+
+        # Score stats
+        mean_score = statistics.mean(scores)
+        median_score = statistics.median(scores)
+        min_score = min(scores)
+        max_score = max(scores)
+
+        # Total time
+        total_time = getattr(self, "total_solve_time", sum(durations))
+
+        stats_text = f"""PUZZLE SOLVING STATISTICS
+
+Success Rate: {success_count}/{total_puzzles} ({success_rate:.1f}%)
+
+SOLVE TIMES:
+  Mean:   {mean_duration:.2f}s
+  Median: {median_duration:.2f}s
+  Min:    {min_duration:.2f}s
+  Max:    {max_duration:.2f}s
+  Total:  {total_time:.1f}s
+
+SCORES:
+  Mean:   {mean_score:.0f}
+  Median: {median_score:.0f}
+  Min:    {min_score:.0f}
+  Max:    {max_score:.0f}
+
+Fastest solve: {min_duration:.2f}s (Score: {scores[durations.index(min_duration)]:.0f})
+Best score: {max_score:.0f} (Time: {durations[scores.index(max_score)]:.2f}s)"""
+
+        return stats_text
+
     def _update_progress(self, value):
         """Update progress bar"""
         self.progress_bar.value = value
@@ -993,7 +1096,6 @@ class ControllerGUI(BoxLayout):
             puzzle_count = len(self.current_puzzle_set.puzzles)
             self.status_label.text = f"Total: {puzzle_count} puzzles generated"
             self.progress_bar.value = 100
-
             self._update_statistics()
 
         except Exception as e:
@@ -1014,16 +1116,26 @@ class ControllerGUI(BoxLayout):
         total_time = getattr(self, "total_solve_time", 0)
         avg_time = total_time / total if total > 0 else 0
 
-        self.status_label.text = (
-            f"Solved {successful}/{total} puzzles (avg score: {avg_score:.0f}, "
-            f"total time: {total_time:.1f}s, avg: {avg_time:.1f}s)"
-        )
+        # NEW: Calculate median solve time
+        if successful > 0:
+            successful_durations = [r.duration for r in self.solve_results if r.success]
+            median_time = statistics.median(successful_durations)
+            self.status_label.text = (
+                f"Solved {successful}/{total} puzzles (avg score: {avg_score:.0f}, "
+                f"median time: {median_time:.1f}s, total: {total_time:.1f}s)"
+            )
+        else:
+            self.status_label.text = f"Failed to solve {total} puzzles"
+
         self.progress_bar.value = 100
         self.visualize_btn.disabled = False
 
+        # NEW: Enable analytics button
+        if successful > 0:
+            self.analytics_btn.disabled = False
+
         # Refresh all thumbnails to show solved state
         self.puzzle_grid.refresh_puzzle_thumbnails()
-
         self._update_statistics()
 
     def _update_statistics(self):
@@ -1051,6 +1163,12 @@ class ControllerGUI(BoxLayout):
                         else 0
                     )
 
+                    # NEW: Calculate median solve time
+                    successful_durations = [
+                        r.duration for r in self.solve_results if r.success
+                    ]
+                    median_time = statistics.median(successful_durations)
+
                     avg_score = statistics.mean(
                         [r.score for r in self.solve_results if r.success]
                     )
@@ -1061,7 +1179,7 @@ class ControllerGUI(BoxLayout):
                     self.stats_label.text = (
                         f"Puzzles: {puzzle_count}\n"
                         f"Success: {successful}/{len(self.solve_results)} ({success_rate:.1f}%)\n"
-                        f"Total: {total_time:.1f}s, Avg: {avg_time:.1f}s\n"
+                        f"Median: {median_time:.1f}s, Avg: {avg_time:.1f}s\n"
                         f"Score: {avg_score:.0f}pts, Conf: {avg_confidence:.1f}%"
                     )
                 else:
@@ -1073,6 +1191,7 @@ class ControllerGUI(BoxLayout):
                     f"  No solve results, setting: Puzzles: {puzzle_count}, Not solved yet"
                 )
                 self.stats_label.text = f"Puzzles: {puzzle_count}\nNot solved yet"
+
             print("_update_statistics completed successfully")
         except Exception as e:
             print(f"EXCEPTION in _update_statistics: {e}")
@@ -1143,6 +1262,7 @@ class ControllerGUI(BoxLayout):
                     timestamp=datetime.now(),
                     puzzles=loaded_puzzles,
                 )
+
                 self.status_label.text = (
                     f"Loaded {len(loaded_puzzles)} existing puzzles"
                 )
@@ -1154,11 +1274,6 @@ class ControllerGUI(BoxLayout):
             import traceback
 
             traceback.print_exc()
-
-    def _update_bg(self, instance, value):
-        """Update background"""
-        self.bg.pos = self.pos
-        self.bg.size = self.size
 
     def visualize_solution(self, instance):
         """Show visualization panel for selected puzzle"""
@@ -1192,34 +1307,9 @@ class ControllerGUI(BoxLayout):
                 self.show_visualization_panel(steps_data)
             else:
                 self.status_label.text = "No visualization data available!"
-
         except Exception as e:
             self.logger.exception(f"Visualization failed: {e}")
             self.status_label.text = f"Visualization error: {e}"
-
-    def generate_puzzles(self, instance):
-        """Generate 10 puzzles - adds to existing set or starts fresh"""
-        existing_count = (
-            len(self.current_puzzle_set.puzzles) if self.current_puzzle_set else 0
-        )
-
-        if existing_count == 0:
-            self.status_label.text = "Generating 10 new puzzles..."
-            start_index = 0
-            # Clean up any leftover files
-            self._cleanup_existing_puzzles()
-        else:
-            self.status_label.text = (
-                f"Adding 10 more puzzles (currently have {existing_count})..."
-            )
-            start_index = existing_count
-
-        self.progress_bar.value = 0
-
-        # Generate in background thread
-        threading.Thread(
-            target=self._generate_puzzles_thread, args=(10, start_index)
-        ).start()
 
     def _cleanup_existing_puzzles(self):
         """Delete existing generated puzzle directories and temp files"""
@@ -1251,6 +1341,11 @@ class ControllerGUI(BoxLayout):
             # Don't let cleanup errors prevent puzzle generation
             pass
 
+    def _update_bg(self, instance, value):
+        """Update background"""
+        self.bg.pos = self.pos
+        self.bg.size = self.size
+
 
 class ControllerApp(App):
     """Main Kivy application"""
@@ -1261,7 +1356,6 @@ class ControllerApp(App):
         Window.title = "PREN Puzzle Solver - Controller"
         Window.size = (1200, 800)
         Window.minimum_size = (800, 600)
-
         return ControllerGUI()
 
 

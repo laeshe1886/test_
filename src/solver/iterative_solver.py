@@ -93,7 +93,9 @@ class IterativeSolver:
         """
 
         height, width = target.shape
-        self.corner_fitter = CornerFitter(width=width, height=height, tuning=self.tuning)
+        self.corner_fitter = CornerFitter(
+            width=width, height=height, tuning=self.tuning
+        )
 
         # Reset state
         self.all_guesses = []

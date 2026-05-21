@@ -6,6 +6,7 @@ Haupt-Pipeline orchestriert alle Schritte
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from time import time
 from typing import Optional
 
@@ -23,6 +24,7 @@ from ..solver.guess_generator import GuessGenerator
 from ..solver.validation.scorer import PlacementScorer
 from ..ui.simulator.guess_renderer import GuessRenderer
 from ..utils.logger import setup_logger
+from ..vision.camera_loader import CameraLoader
 from ..vision.mock_puzzle_creator import MockPuzzleGenerator
 from .config import Config
 
@@ -35,8 +37,6 @@ class PipelineResult:
     duration: float
     message: str
     solution: Optional[dict] = None
-
-
 
 
 class PuzzlePipeline:
@@ -60,12 +60,14 @@ class PuzzlePipeline:
         self.show_ui = show_ui
         self.puzzle_dir = puzzle_dir  # Directory containing a saved puzzle
 
-        # Initialize solver components - renderer will be created with target
-        self.resolution = config.resolution
-        # Alle Pixel-basierten Tuning-Parameter an die Aufloesung anpassen
-        self.tuning = config.tuning.scaled(self.resolution.solver_scale)
         self.guess_generator = GuessGenerator(rotation_step=90)
         self.renderer = None  # Will be created after we have target
+        self._init_resolution_components()
+
+    def _init_resolution_components(self):
+        """(Re-)initialisiert alle auflösungsabhängigen Komponenten."""
+        self.resolution = self.config.resolution
+        self.tuning = self.config.tuning.scaled(self.resolution.solver_scale)
         self.scorer = PlacementScorer(
             overlap_penalty=self.tuning.overlap_penalty,
             coverage_reward=self.tuning.coverage_reward,
@@ -79,19 +81,32 @@ class PuzzlePipeline:
         start_time = time()
 
         try:
-            
             if self.config.hardware.enabled:
-                from src.hardware.motion_control.MotionControlCommunication import wait_for_robot_start
-                
-                self.logger.info("Phase 0: Warte auf Freigabe durch den Roboter...")
-                wait_for_robot_start(
-                    port=self.config.hardware.serial_port,
-                    baudrate=self.config.hardware.baud_rate
+                from src.hardware.motion_control.MotionControlCommunication import (
+                    wait_for_robot_start,
                 )
-                
+
+                self.logger.info(
+                    "Phase 0: Warte auf Freigabe durch den Roboter (Hardware-Button)..."
+                )
+                try:
+                    wait_for_robot_start(
+                        port=self.config.hardware.serial_port,
+                        baudrate=self.config.hardware.baud_rate,
+                    )
+                except Exception as e:
+                    self.logger.error(f"Abbruch in Phase 0: {e}")
+                    return PipelineResult(
+                        success=False,
+                        duration=0,
+                        message="Start durch Hardware-Button fehlgeschlagen",
+                    )
+
             # Phase 1: Vision
             self.logger.info("Phase 1: Bildverarbeitung")
-            pieces, piece_shapes, piece_shapes_fine, corner_info, puzzle_pieces = self._process_vision()
+            pieces, piece_shapes, piece_shapes_fine, corner_info, puzzle_pieces = (
+                self._process_vision()
+            )
 
             # Phase 2: Solving
             self.logger.info("Phase 2: Puzzle loesen")
@@ -148,6 +163,10 @@ class PuzzlePipeline:
             output_dir = "data/mock_pieces"
             self.logger.info(f"  → Using default directory: {output_dir}")
 
+        # Kamera-Eingang hat Vorrang vor Mock-Pieces
+        if CameraLoader.has_parts_json(output_dir):
+            return self._process_vision_camera(output_dir)
+
         generator = MockPuzzleGenerator(
             output_dir=output_dir,
             num_cuts=self.config.vision.num_cuts,
@@ -202,8 +221,12 @@ class PuzzlePipeline:
                 # Load to get dimensions (Pixel an Aufloesung anpassen)
                 img = cv2.imread(str(piece_path), cv2.IMREAD_UNCHANGED)
                 if img is not None:
-                    piece_h = max(1, int(round(img.shape[0] * self.resolution.solver_scale)))
-                    piece_w = max(1, int(round(img.shape[1] * self.resolution.solver_scale)))
+                    piece_h = max(
+                        1, int(round(img.shape[0] * self.resolution.solver_scale))
+                    )
+                    piece_w = max(
+                        1, int(round(img.shape[1] * self.resolution.solver_scale))
+                    )
 
                     # Assign corner
                     corner_idx = idx % len(corner_positions)
@@ -221,13 +244,19 @@ class PuzzlePipeline:
         self.logger.info("  → Feature-Extraktion...")
 
         # Coarse copy for solver (fast)
-        piece_ids, piece_shapes = generator.load_pieces_for_solver(scale=self.resolution.solver_scale)
+        piece_ids, piece_shapes = generator.load_pieces_for_solver(
+            scale=self.resolution.solver_scale
+        )
 
         # Full-res copy kept separately for fine-tuning
-        _, piece_shapes_fine = generator.load_pieces_for_solver(scale=self.resolution.finetune_scale)
+        _, piece_shapes_fine = generator.load_pieces_for_solver(
+            scale=self.resolution.finetune_scale
+        )
 
         # Analysis uses coarse shapes (classification does not need full res)
-        PieceAnalyzer.analyze_all_pieces(puzzle_pieces, piece_shapes, tuning=self.tuning)
+        PieceAnalyzer.analyze_all_pieces(
+            puzzle_pieces, piece_shapes, tuning=self.tuning
+        )
 
         # Print analysis results
         self.logger.info("\n" + "=" * 80)
@@ -264,7 +293,82 @@ class PuzzlePipeline:
 
         return piece_ids, piece_shapes, piece_shapes_fine, {}, puzzle_pieces
 
-    def _solve_puzzle(self, pieces, piece_shapes, piece_shapes_fine, piece_corner_info, puzzle_pieces):
+    def _process_vision_camera(self, input_dir: str):
+        """Kamera-Pfad: lädt Teile aus parts.json + PNG-Masken."""
+        loader = CameraLoader(input_dir)
+        json_data = loader.load_json()
+
+        self.logger.info(
+            f"  → Kamera-Eingabe erkannt: {loader.px_per_mm} px/mm, "
+            f"A4 {loader.a4_width_mm}×{loader.a4_height_mm} mm, "
+            f"Koordinatenursprung: {loader.origin}"
+        )
+
+        for warning in loader.validate():
+            self.logger.warning(f"  ⚠  {warning}")
+
+        # Auflösung aus JSON übernehmen und alle abhängigen Komponenten neu initialisieren
+        self.config.resolution.native_px_per_mm = loader.px_per_mm
+        self.config.resolution.a4_width_mm = loader.a4_width_mm
+        self.config.resolution.a4_height_mm = loader.a4_height_mm
+        # A5-Quellbereich = gleiche Abmessungen wie A4-Ziel (Kamera sieht die Ablage)
+        self.config.resolution.a5_width_mm = loader.a4_width_mm
+        self.config.resolution.a5_height_mm = loader.a4_height_mm
+        self._init_resolution_components()
+
+        self.logger.info(f"  → solver_scale={self.resolution.solver_scale:.4f}, "
+                         f"score_weight={self.resolution.score_weight_multiplier:.1f}")
+
+        puzzle_pieces = loader.create_puzzle_pieces(self.resolution.solver_px_per_mm)
+
+        piece_ids, piece_shapes = loader.load_pieces_for_solver(
+            scale=self.resolution.solver_scale
+        )
+        _, piece_shapes_fine = loader.load_pieces_for_solver(
+            scale=self.resolution.finetune_scale
+        )
+
+        self.logger.info(f"  → {len(piece_ids)} Kamera-Teile geladen")
+        self.logger.info("  → Segmentierung...")
+        self.logger.info("  → Feature-Extraktion...")
+
+        PieceAnalyzer.analyze_all_pieces(puzzle_pieces, piece_shapes, tuning=self.tuning)
+
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("PIECE ANALYSIS RESULTS")
+        self.logger.info("=" * 80)
+
+        corner_count = sum(1 for p in puzzle_pieces if p.piece_type == "corner")
+        edge_count = sum(1 for p in puzzle_pieces if p.piece_type == "edge")
+        center_count = sum(1 for p in puzzle_pieces if p.piece_type == "center")
+
+        self.logger.info(f"\n[STATS] Classification:")
+        self.logger.info(f"    Corner pieces: {corner_count}")
+        self.logger.info(f"    Edge pieces: {edge_count}")
+        self.logger.info(f"    Center pieces: {center_count}")
+
+        debug_dir = Path(input_dir) / "debug"
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+            save_debug = True
+        except OSError:
+            save_debug = False
+
+        for piece in puzzle_pieces:
+            pid = int(piece.id)
+            self.logger.info(f"\n{piece.summary()}")
+            if save_debug and pid in piece_shapes:
+                vis = PieceAnalyzer.visualize_corners(piece_shapes[pid], piece)
+                cv2.imwrite(str(debug_dir / f"piece_{pid}_analysis.png"), vis)
+
+        self.logger.info(f"\n  → {len(piece_ids)} Teile geladen und analysiert")
+        self.logger.info("=" * 80 + "\n")
+
+        return piece_ids, piece_shapes, piece_shapes_fine, {}, puzzle_pieces
+
+    def _solve_puzzle(
+        self, pieces, piece_shapes, piece_shapes_fine, piece_corner_info, puzzle_pieces
+    ):
         """Puzzle loesen mit iterativem Ansatz"""
         self.logger.info("  → Layout berechnen...")
 
@@ -312,7 +416,9 @@ class PuzzlePipeline:
 
         # Phase 2b: Fine-tuning auf voller Aufloesung
         self.logger.info("Phase 2b: Feinabstimmung (volle Aufloesung)")
-        all_guesses_for_finetune = solution.all_guesses if solution.all_guesses is not None else []
+        all_guesses_for_finetune = (
+            solution.all_guesses if solution.all_guesses is not None else []
+        )
         fine_placements, fine_score = self._finetune_solution(
             solution.remaining_placements,
             piece_shapes_fine,
@@ -351,7 +457,9 @@ class PuzzlePipeline:
                 piece.place_pose = Pose(
                     x=placement["x"], y=placement["y"], theta=placement["theta"]
                 )
-                piece.confidence = 1.0 if solution.score > self.tuning.score_threshold else 0.5
+                piece.confidence = (
+                    1.0 if solution.score > self.tuning.score_threshold else 0.5
+                )
                 self.logger.debug(f"    Piece {piece_id}: {piece.place_pose}")
 
         # Print movement instructions using PuzzlePiece objects
@@ -508,7 +616,9 @@ class PuzzlePipeline:
 
         self.logger.info("\n" + "=" * 80 + "\n")
 
-    def _finetune_solution(self, placements, piece_shapes_fine, target_coarse, all_guesses):
+    def _finetune_solution(
+        self, placements, piece_shapes_fine, target_coarse, all_guesses
+    ):
         """Feinabstimmung auf voller Aufloesung.
 
         Hochskalierte Koordinaten (fine-space), Suchschritte skaliert nach
@@ -518,14 +628,13 @@ class PuzzlePipeline:
         if not placements:
             return placements, 0.0
 
-        ratio = self.resolution.finetune_ratio          # coarse→fine
-        coarse_ratio = 1.0 / ratio                      # fine→coarse
+        ratio = self.resolution.finetune_ratio  # coarse→fine
+        coarse_ratio = 1.0 / ratio  # fine→coarse
         fs = self.resolution.finetune_px_per_mm
 
         # Skaliere Koordinaten in fine-Aufloesung
         fine_placements = [
-            {**p, "x": p["x"] * ratio, "y": p["y"] * ratio}
-            for p in placements
+            {**p, "x": p["x"] * ratio, "y": p["y"] * ratio} for p in placements
         ]
 
         fine_target = np.ones(
@@ -584,15 +693,31 @@ class PuzzlePipeline:
         return True
 
     def _execute_hardware(self, solution):
-        """Hardware ansteuern (PREN2)"""
-        self.logger.info("  → Motoren initialisieren...")
-        self.logger.info("  → Teile platzieren...")
+        from src.hardware.motion_control.MotionControlCommunication import send_to_robot
 
-        # The movement instructions are already printed by _print_movement_instructions_from_pieces
-        # Hardware can read them from the log
+        self.logger.info("  → Initialisiere UART-Verbindung...")
 
-        # TODO: Implementierung in PREN2
-        pass
+        puzzle_pieces = solution.get("puzzle_pieces", [])
+
+        if not puzzle_pieces:
+            self.logger.error("  ! Keine Puzzleteile zur Übertragung gefunden.")
+            return
+
+        self.logger.info(f"  → Sende {len(puzzle_pieces)} Teile an den Roboter...")
+
+        success = send_to_robot(
+            pieces=puzzle_pieces,
+            port=self.config.hardware.serial_port,
+            baudrate=self.config.hardware.baud_rate,
+            ppx_to_mm=self.config.resolution.native_px_per_mm,
+            timeout=5.0,
+        )
+
+        if success:
+            self.logger.info("  ✓ Hardware-Befehl erfolgreich quittiert (ACK OK).")
+            self.logger.info("  → Roboter führt Bewegungen nun aus.")
+        else:
+            self.logger.error("  X Fehler bei der Kommunikation mit dem STM32.")
 
     def _launch_ui(self, solution):
         """Launch Kivy UI to visualize the solution."""
@@ -626,5 +751,6 @@ class PuzzlePipeline:
             self.logger.info(f"  → Calculated movement data for {num_movements} pieces")
 
         from src.ui.simulator.solver_visualizer import SolverVisualizerApp
+
         app = SolverVisualizerApp(solver_data)
         app.run()
