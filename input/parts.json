@@ -1,0 +1,154 @@
+{
+  "part_count": 6,
+  "expected_part_count": [
+    4,
+    6
+  ],
+  "part_count_is_valid": true,
+  "coordinate_system": {
+    "origin": "top_right",
+    "description": "origin top_right, x left, y down"
+  },
+  "px_per_mm": 10.0,
+  "a4_size_mm": {
+    "width": 297.0,
+    "height": 210.0
+  },
+  "frame_offsets_mm": {
+    "left": 0.0,
+    "right": 0.0,
+    "top": 0.0,
+    "bottom": 0.0
+  },
+  "expected_total_part_area_mm2": 20879,
+  "area_validation": {
+    "expected_total_area_mm2": 20879,
+    "measured_total_area_mm2": 20515.22,
+    "area_error_mm2": -363.78,
+    "area_error_percent": -1.742325,
+    "max_allowed_error_percent": 1.0,
+    "is_valid": false
+  },
+  "parts": [
+    {
+      "index": 1,
+      "part_name": "part_01",
+      "centroid_mm": {
+        "x": 146.785119,
+        "y": 53.102991
+      },
+      "centroid_px": {
+        "x": 1467.851188,
+        "y": 531.029908
+      },
+      "area_mm2": 4653.4,
+      "bounding_box_px": {
+        "x": 986,
+        "y": 186,
+        "w": 969,
+        "h": 754
+      },
+      "algo_input_mask_filename": "piece_0.png"
+    },
+    {
+      "index": 2,
+      "part_name": "part_02",
+      "centroid_mm": {
+        "x": 247.039374,
+        "y": 59.315871
+      },
+      "centroid_px": {
+        "x": 2470.393739,
+        "y": 593.158708
+      },
+      "area_mm2": 2686.035,
+      "bounding_box_px": {
+        "x": 213,
+        "y": 272,
+        "w": 657,
+        "h": 666
+      },
+      "algo_input_mask_filename": "piece_1.png"
+    },
+    {
+      "index": 3,
+      "part_name": "part_03",
+      "centroid_mm": {
+        "x": 52.766135,
+        "y": 67.921354
+      },
+      "centroid_px": {
+        "x": 527.661347,
+        "y": 679.213537
+      },
+      "area_mm2": 2758.715,
+      "bounding_box_px": {
+        "x": 2132,
+        "y": 387,
+        "w": 696,
+        "h": 649
+      },
+      "algo_input_mask_filename": "piece_2.png"
+    },
+    {
+      "index": 4,
+      "part_name": "part_04",
+      "centroid_mm": {
+        "x": 239.062547,
+        "y": 138.984852
+      },
+      "centroid_px": {
+        "x": 2390.625469,
+        "y": 1389.848525
+      },
+      "area_mm2": 3551.77,
+      "bounding_box_px": {
+        "x": 293,
+        "y": 997,
+        "w": 609,
+        "h": 732
+      },
+      "algo_input_mask_filename": "piece_3.png"
+    },
+    {
+      "index": 5,
+      "part_name": "part_05",
+      "centroid_mm": {
+        "x": 57.976848,
+        "y": 153.328055
+      },
+      "centroid_px": {
+        "x": 579.768485,
+        "y": 1533.280547
+      },
+      "area_mm2": 3290.585,
+      "bounding_box_px": {
+        "x": 2049,
+        "y": 1176,
+        "w": 701,
+        "h": 658
+      },
+      "algo_input_mask_filename": "piece_4.png"
+    },
+    {
+      "index": 6,
+      "part_name": "part_06",
+      "centroid_mm": {
+        "x": 142.302242,
+        "y": 153.974233
+      },
+      "centroid_px": {
+        "x": 1423.022421,
+        "y": 1539.742329
+      },
+      "area_mm2": 3574.715,
+      "bounding_box_px": {
+        "x": 1148,
+        "y": 1158,
+        "w": 850,
+        "h": 791
+      },
+      "algo_input_mask_filename": "piece_5.png"
+    }
+  ]
+}

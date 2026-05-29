@@ -39,15 +39,14 @@ def send_to_robot(
     pieces: list[PuzzlePiece],
     port: str = DEFAULT_PORT,
     baudrate: int = DEFAULT_BAUDRATE,
-    ppx_to_mm: float = PIXEL_TO_MM_SCALE,
+    pick_px_per_mm: float = PIXEL_TO_MM_SCALE,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> bool:
     """
     Sende Puzzle-Loesung ueber UART an den STM32.
 
-    Baut eine PuzzleCommand protobuf-Nachricht aus den PuzzlePiece-Objekten
-    und sendet sie als laengenpraefixiertes Frame ueber die serielle
-    Schnittstelle. Wartet auf ein Ack vom STM32.
+    pick_pose.x/y: Zentroid in Solver-Pixeln → wird durch pick_px_per_mm geteilt → mm
+    place_pose.x/y: Zentroid bereits in mm (umgerechnet in pipeline.py) → direkt verwenden
 
     Returns True bei Erfolg (STATUS_OK), False bei Fehler.
     """
@@ -55,13 +54,17 @@ def send_to_robot(
 
     for p in pieces:
         piece = cmd.pieces.add()
+        a4_x_mm = 297
         piece.piece_id = int(p.id)
-        piece.pick_x = p.pick_pose.x / ppx_to_mm
-        piece.pick_y = p.pick_pose.y / ppx_to_mm
+        piece.pick_x = a4_x_mm - (p.pick_pose.x / pick_px_per_mm)
+        piece.pick_y = p.pick_pose.y / pick_px_per_mm
         if p.place_pose:
-            piece.place_x = p.place_pose.x / ppx_to_mm
-            piece.place_y = p.place_pose.y / ppx_to_mm
-            piece.rotation = p.place_pose.theta
+            piece.place_x = p.place_pose.y  # already in mm
+            piece.place_y = p.place_pose.x  # already in mm
+            rotation = (90 - p.place_pose.theta) % 360
+            if rotation > 180:
+                rotation -= 360
+            piece.rotation = rotation
         else:
             piece.place_x = 0.0
             piece.place_y = 0.0

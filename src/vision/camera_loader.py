@@ -10,12 +10,13 @@ Expected input directory layout:
 """
 
 import json
-import cv2
-import numpy as np
 from pathlib import Path
 
-from src.utils.puzzle_piece import PuzzlePiece
+import cv2
+import numpy as np
+
 from src.utils.pose import Pose
+from src.utils.puzzle_piece import PuzzlePiece
 
 
 class CameraLoader:
@@ -87,7 +88,12 @@ class CameraLoader:
 
         for part in self._json["parts"]:
             idx = part["index"] - 1  # JSON is 1-based
-            mask_path = self.input_dir / part["mask_filename"]
+
+            mask_filename = part.get("algo_input_mask_filename") or part.get("mask_filename")
+            if not mask_filename:
+                print(f"  ⚠️  Kein Maskenname für Teil {part.get('index')}")
+                continue
+            mask_path = self.input_dir / mask_filename
 
             mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
             if mask is None:
@@ -99,7 +105,9 @@ class CameraLoader:
             if scale != 1.0:
                 new_h = max(1, int(round(mask.shape[0] * scale)))
                 new_w = max(1, int(round(mask.shape[1] * scale)))
-                mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                mask = cv2.resize(mask.astype(np.float32), (new_w, new_h), interpolation=interp)
+                mask = (mask > 0.5).astype(np.uint8)
 
             piece_shapes[idx] = mask
             piece_ids.append(idx)
