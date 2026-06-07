@@ -55,12 +55,13 @@ class PuzzlePipeline:
     """
 
     def __init__(
-        self, config: Config, show_ui: bool = False, puzzle_dir: str | None = None
+        self, config: Config, show_ui: bool = False, puzzle_dir: str | None = None, skip_camera: bool = False
     ):
         self.config = config
         self.logger = setup_logger("pipeline")
         self.show_ui = show_ui
-        self.puzzle_dir = puzzle_dir  # Directory containing a saved puzzle
+        self.puzzle_dir = puzzle_dir
+        self.skip_camera = skip_camera
 
         self.guess_generator = GuessGenerator(rotation_step=90)
         self.renderer = None  # Will be created after we have target
@@ -116,12 +117,14 @@ class PuzzlePipeline:
                     )
 
             # Phase 0.5: Bildaufnahme
-            self.logger.info("Phase 0.5: Bildaufnahme")
-
-            _camera_start = time()
-            runCameraModule(cam)
-            _time_camera = time() - _camera_start
-            self.logger.info(f"Kameramodul abgeschossen {_time_camera:.1f}s")
+            if not self.skip_camera:
+                self.logger.info("Phase 0.5: Bildaufnahme")
+                _camera_start = time()
+                runCameraModule(cam)
+                _time_camera = time() - _camera_start
+                self.logger.info(f"Kameramodul abgeschossen {_time_camera:.1f}s")
+            else:
+                self.logger.info("Phase 0.5: Bildaufnahme übersprungen (--no-camera)")
 
 
             # Phase 1: Vision
@@ -446,12 +449,14 @@ class PuzzlePipeline:
         # Create initial placements from PuzzlePiece objects
         initial_placements = self._create_initial_placements_from_pieces(puzzle_pieces)
 
+        score_accept = self._compute_dynamic_score_accept(piece_shapes, target)
+
         solution = iterative_solver.solve_iteratively(
             piece_shapes=piece_shapes,
             target=target,
             puzzle_pieces=puzzle_pieces,
             score_max=self.config.tuning.score_max,
-            score_accept=self.config.tuning.score_accept,
+            score_accept=score_accept,
             initial_corner_count=self.tuning.initial_corner_count,
             max_corners_to_refine=self.tuning.max_corners_to_refine,
             max_iterations=self.tuning.max_iterations,
@@ -462,9 +467,69 @@ class PuzzlePipeline:
         else:
             self.logger.info(f"  ✓ Loesung gefunden mit Score: {solution.score:.2f}")
 
-        # Phase 2b-pre: Wall-align finetune (push corners/edges flush to walls)
+        # Phase 2b-pre: Wall-align finetune bei fine-Aufloesung (2.0 px/mm)
         if not self.config.tuning.skip_wall_align and solution.remaining_placements:
-            self.logger.info("Phase 2b-pre: Wandausrichtung...")
+            self.logger.info("Phase 2b-pre: Wandausrichtung (fine-Aufloesung)...")
+            ratio = self.resolution.finetune_ratio  # coarse→fine
+            fs = self.resolution.finetune_px_per_mm
+
+            fine_align_target = np.ones(
+                (self.resolution.fine_a4_height, self.resolution.fine_a4_width),
+                dtype=np.uint8,
+            )
+            fine_align_renderer = GuessRenderer(
+                width=self.resolution.fine_a4_width,
+                height=self.resolution.fine_a4_height,
+            )
+            fine_align_scorer = PlacementScorer(
+                overlap_penalty=self.config.tuning.overlap_penalty,
+                coverage_reward=self.config.tuning.coverage_reward,
+                gap_penalty=self.config.tuning.gap_penalty,
+                weight_multiplier=self._finetune_weight,
+            )
+
+            dilation_px = int(round(self.config.tuning.gap_dilation_mm * fs))
+            if dilation_px > 0:
+                kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * dilation_px + 1, 2 * dilation_px + 1)
+                )
+                fine_align_target = cv2.dilate(fine_align_target.astype(np.uint8), kernel).astype(fine_align_target.dtype)
+
+            fine_placements_for_align = [
+                {**p, "x": p["x"] * ratio, "y": p["y"] * ratio}
+                for p in solution.remaining_placements
+            ]
+
+            wall_aligner = WallAlignFinetuner(
+                renderer=fine_align_renderer,
+                scorer=fine_align_scorer,
+                slide_positions=self.config.tuning.wall_align_slide_positions,
+            )
+            aligned_fine = wall_aligner.finetune(
+                fine_placements_for_align, piece_shapes_fine, fine_align_target
+            )
+            # Geometrische Ausrichtung ist per Konstruktion korrekt — kein Score-Check noetig
+            solution.remaining_placements = [
+                {**p, "x": p["x"] / ratio, "y": p["y"] / ratio}
+                for p in aligned_fine
+            ]
+            self.logger.info("  WallAlign abgeschlossen (geometrisch, immer akzeptiert)")
+            for p in aligned_fine:
+                pid = p["piece_id"]
+                shape = piece_shapes_fine.get(pid)
+                if shape is not None:
+                    from src.utils.geometry import rotate_and_crop as _dbg_rac
+                    rsh = _dbg_rac(shape, p["theta"])
+                    ph_, pw_ = rsh.shape
+                    self.logger.info(
+                        f"    [{pid}] side={p.get('side','corner/center'):6s} "
+                        f"x={p['x']:.1f}..{p['x']+pw_:.1f}  y={p['y']:.1f}..{p['y']+ph_:.1f}  "
+                        f"(pw={pw_} ph={ph_})  canvas={self.resolution.fine_a4_width}x{self.resolution.fine_a4_height}"
+                    )
+
+        # Phase 2b-pre2: Edge sliding along wall
+        if not self.config.tuning.skip_edge_slide and solution.remaining_placements:
+            self.logger.info("Phase 2b-pre2: Kanten entlang Wand verschieben...")
             dilation_px = int(round(self.config.tuning.gap_dilation_mm * self.resolution.solver_px_per_mm))
             align_target = target
             if dilation_px > 0:
@@ -472,12 +537,12 @@ class PuzzlePipeline:
                     cv2.MORPH_ELLIPSE, (2 * dilation_px + 1, 2 * dilation_px + 1)
                 )
                 align_target = cv2.dilate(target.astype(np.uint8), kernel).astype(target.dtype)
-            wall_aligner = WallAlignFinetuner(
+            edge_slider = WallAlignFinetuner(
                 renderer=self.renderer,
                 scorer=self.scorer,
                 slide_positions=self.config.tuning.wall_align_slide_positions,
             )
-            solution.remaining_placements = wall_aligner.finetune(
+            solution.remaining_placements = edge_slider.slide_edges(
                 solution.remaining_placements, piece_shapes, align_target
             )
 
@@ -502,6 +567,20 @@ class PuzzlePipeline:
                 all_guesses_for_finetune,
             )
         fine_placements = self._pull_to_center(fine_placements, piece_shapes_fine)
+        for p in fine_placements:
+            pid = p["piece_id"]
+            shape = piece_shapes_fine.get(pid)
+            if shape is not None:
+                from src.utils.geometry import rotate_and_crop as _dbg_rac2
+                rsh = _dbg_rac2(shape, p["theta"])
+                ph_, pw_ = rsh.shape
+                dist_left = p["x"]
+                dist_right = self.resolution.fine_a4_width - (p["x"] + pw_)
+                self.logger.info(
+                    f"  [pull] [{pid}] side={p.get('side','corner/center'):6s} "
+                    f"x={p['x']:.1f}  dist_left={dist_left:.1f}  dist_right={dist_right:.1f}  "
+                    f"y={p['y']:.1f}  dist_top={p['y']:.1f}  dist_bot={self.resolution.fine_a4_height-(p['y']+ph_):.1f}"
+                )
         # fine_placements are in fine-coordinate space.
         # Convert back to coarse for the visualizer/pipeline dict.
         ratio = self.resolution.finetune_ratio
@@ -513,7 +592,7 @@ class PuzzlePipeline:
         # All guesses (coarse coords) — fine-tuner already appended its steps
         all_guesses = all_guesses_for_finetune
 
-        # Append final coarse result if not already there
+        # Append final result (wall-aligned, what gets sent to the robot)
         if coarse_fine_placements:
             if not all_guesses or all_guesses[-1] != coarse_fine_placements:
                 all_guesses.append(coarse_fine_placements)
@@ -522,7 +601,7 @@ class PuzzlePipeline:
 
         # Normalise to weight=1.0 so the visualizer (which uses no weight_multiplier) can match it
         best_score = solution.score / self._score_weight
-        best_guess = coarse_fine_placements
+        best_guess = all_guesses[-1] if all_guesses else coarse_fine_placements
         best_guess_index = len(all_guesses) - 1 if all_guesses else 0
 
         # Populate place_pose with fine coordinates (precision output for robot).
@@ -645,6 +724,35 @@ class PuzzlePipeline:
 
         return surfaces
 
+    def _compute_dynamic_score_accept(self, piece_shapes: dict, target: np.ndarray) -> float:
+        """Berechnet score_accept dynamisch anhand der Teilflaechen vs. Zielflaeche.
+
+        Bei Puzzles mit grossen Luecken ist der erreichbare Maximalscore kleiner als
+        score_max. Der Accept-Schwellwert wird als Anteil des theoretischen Maximums
+        berechnet, sodass er sich automatisch anpasst.
+        """
+        target_area = max(1, int(np.sum(target > 0)))
+        total_piece_area = sum(
+            int(np.sum(shape > 0)) for shape in piece_shapes.values()
+        )
+        coverage_ratio = min(1.0, total_piece_area / target_area)
+
+        t = self.config.tuning
+        # Theoretischer Maximalscore: perfekte Abdeckung ohne Ueberlappung
+        # = coverage_reward * piece_area * weight - gap_penalty * gap_area * weight
+        theoretical_max = t.score_max * (
+            coverage_ratio * (t.coverage_reward + t.gap_penalty) - t.gap_penalty
+        )
+        theoretical_max = max(0.0, theoretical_max)
+
+        score_accept = theoretical_max * t.score_accept_ratio
+        self.logger.info(
+            f"  → Dynamischer Score-Accept: {score_accept:.0f} "
+            f"(coverage_ratio={coverage_ratio:.2%}, theoretical_max={theoretical_max:.0f}, "
+            f"ratio={t.score_accept_ratio})"
+        )
+        return score_accept
+
     def _create_initial_placements_from_pieces(self, puzzle_pieces):
         """
         Create initial placements from PuzzlePiece objects.
@@ -755,9 +863,11 @@ class PuzzlePipeline:
                 result.append({**p, "x": p["x"] + shift_x, "y": p["y"] + shift_y})
                 continue
 
+            if pull_px <= 0:
+                result.append(p)
+                continue
+
             # Corner/center: check all four edges of the bounding box against walls.
-            # top-left alone is unreliable for large pieces — a tall bottom piece
-            # has its top-left y in the upper half of the canvas.
             shape = piece_shapes_fine.get(p["piece_id"])
             canvas_w = self.resolution.fine_a4_width
             canvas_h = self.resolution.fine_a4_height
@@ -769,7 +879,6 @@ class PuzzlePipeline:
             thr = pull_px * 8
             x0, y0, x1, y1 = p["x"], p["y"], p["x"] + pw, p["y"] + ph
             new_x, new_y = p["x"], p["y"]
-            # Snap to wall + pull_px gap — avoids rounding accumulation from wall-align
             if x0 <= thr:
                 new_x = pull_px
             elif x1 >= canvas_w - thr:
